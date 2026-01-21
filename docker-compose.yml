@@ -1,12 +1,10 @@
-cat > docker-compose.yml <<EOF
 version: '3.8'
 
 services:
-  form_bronze_bot:
+  bot:
     build: .
     env_file:
       - .env
     volumes:
       - ./data:/data
     restart: always
-EOF
