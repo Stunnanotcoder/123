@@ -20,6 +20,7 @@ from app.handlers import (
     menu_invite_main,
     menu_settings,
     sculptures_catalog,
+    menu_designer,      # ✅ дизайнер
     admin_broadcast,
     admin_content,
     admin_fileid,
@@ -31,31 +32,35 @@ logger = logging.getLogger("form_bronze_bot")
 
 def build_main_menu_kb(registered: bool):
     kb = InlineKeyboardBuilder()
+
     kb.button(text="🏺 Наши скульптуры", callback_data="menu:sculptures")
     kb.button(text="🏛 О галерее", callback_data="menu:about")
     kb.button(text="⭐ Спецпроекты", callback_data="menu:projects")
+    kb.button(text="🎨 Дизайнер", callback_data="menu:designer")
+
     if registered:
         kb.button(text="👤 Пригласите главного", callback_data="menu:invite_main")
         kb.button(text="⚙️ Настройки", callback_data="menu:settings")
     else:
         kb.button(text="📇 Контакты", callback_data="menu:guest_contacts")
         kb.button(text="⚙️ Настройки", callback_data="menu:guest_settings")
+
     kb.adjust(1)
     return kb.as_markup()
 
 
-def register_core_screens(nav: Nav, repo: Repo):
+def register_core_screens(nav: Nav):
     async def menu_registered(chat_id: int, ctx: dict) -> Screen:
         return Screen(
             text=texts.MENU_REGISTERED_TEXT,
-            photo_file_id=media.PHOTO_MENU,
+            photo_file_id=getattr(media, "PHOTO_MENU", None),
             inline=build_main_menu_kb(registered=True),
         )
 
     async def menu_guest(chat_id: int, ctx: dict) -> Screen:
         return Screen(
             text=texts.MENU_GUEST_TEXT,
-            photo_file_id=media.PHOTO_MENU,
+            photo_file_id=getattr(media, "PHOTO_MENU", None),
             inline=build_main_menu_kb(registered=False),
         )
 
@@ -82,13 +87,14 @@ async def main():
 
     # screens
     start_onboarding.register_screens(nav, repo)
-    register_core_screens(nav, repo)
+    register_core_screens(nav)
     menu_about.register_screens(nav, repo)
     menu_projects.register_screens(nav, repo)
     menu_contacts_guest.register_screens(nav, repo)
     menu_invite_main.register_screens(nav, repo)
     menu_settings.register_screens(nav, repo)
     sculptures_catalog.register_screens(nav, repo)
+    menu_designer.register_screens(nav, repo)
 
     # routers
     dp.include_router(start_onboarding.router)
@@ -98,14 +104,14 @@ async def main():
     dp.include_router(menu_invite_main.router)
     dp.include_router(menu_settings.router)
     dp.include_router(sculptures_catalog.router)
+    dp.include_router(menu_designer.router)
     dp.include_router(admin_broadcast.router)
     dp.include_router(admin_content.router)
     dp.include_router(admin_fileid.router)
 
-
     # ----- admin panel (/admin) + stats -----
     @dp.message(F.text == "/admin")
-    async def admin_panel(message: Message, admin_ids: set[int], repo: Repo):
+    async def admin_panel(message: Message, admin_ids: set[int]):
         if message.from_user.id not in admin_ids:
             return
         kb = InlineKeyboardBuilder()
@@ -117,7 +123,7 @@ async def main():
         await message.answer(texts.ADMIN_PANEL_TEXT, reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data == "admin:stats")
-    async def admin_stats(cb: CallbackQuery, repo: Repo, admin_ids: set[int]):
+    async def admin_stats(cb: CallbackQuery, admin_ids: set[int], repo: Repo):
         if cb.from_user.id not in admin_ids:
             await cb.answer()
             return
@@ -132,10 +138,8 @@ async def main():
     @dp.callback_query(F.data == "menu:main")
     async def go_main(cb: CallbackQuery, repo: Repo, nav: Nav):
         nav.clear(cb.from_user.id)
-        if await is_registered(repo, cb.from_user.id):
-            await nav.show_screen(cb.bot, cb.from_user.id, "menu:registered", remove_reply_keyboard=True)
-        else:
-            await nav.show_screen(cb.bot, cb.from_user.id, "menu:guest", remove_reply_keyboard=True)
+        screen = "menu:registered" if await is_registered(repo, cb.from_user.id) else "menu:guest"
+        await nav.show_screen(cb.bot, cb.from_user.id, screen, remove_reply_keyboard=True)
         await cb.answer()
 
     @dp.callback_query(F.data == "menu:guest")
@@ -151,7 +155,7 @@ async def main():
         await cb.answer()
 
     # ------ fallback: random text ТОЛЬКО вне FSM и НЕ команды ------
-    @dp.message(StateFilter(None), F.text, ~F.text.startswith("/"))
+    @dp.message(StateFilter(None), ~F.text.startswith("/"))
     async def fallback_text(message: Message):
         kb = InlineKeyboardBuilder()
         kb.button(text="🏠 Главное меню", callback_data="menu:main")

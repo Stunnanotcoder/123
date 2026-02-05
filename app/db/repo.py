@@ -22,6 +22,8 @@ class User:
     role: str | None
     phone: str | None
     city: str | None
+    designer_interest: int | None  # ✅ новое поле (может быть None если старая БД)
+    designer_interest_at: str | None  # ✅ когда нажал "Сотрудничать"
     created_at: str | None
     updated_at: str | None
 
@@ -47,9 +49,30 @@ class Repo:
         return self.conn
 
     async def init_schema(self, schema_path: str) -> None:
+        """
+        1) Создаёт таблицы из schema.sql (CREATE TABLE IF NOT EXISTS)
+        2) Делает миграции для существующей БД (ALTER TABLE если колонок нет)
+        """
         sql = Path(schema_path).read_text(encoding="utf-8")
         await self._c().executescript(sql)
         await self._c().commit()
+        await self._apply_migrations()
+
+    async def _apply_migrations(self) -> None:
+        # --- users: designer_interest + designer_interest_at ---
+        cols = await self._table_columns("users")
+
+        if "designer_interest" not in cols:
+            await self._c().execute("ALTER TABLE users ADD COLUMN designer_interest INTEGER DEFAULT 0")
+        if "designer_interest_at" not in cols:
+            await self._c().execute("ALTER TABLE users ADD COLUMN designer_interest_at TEXT NULL")
+
+        await self._c().commit()
+
+    async def _table_columns(self, table: str) -> set[str]:
+        cur = await self._c().execute(f"PRAGMA table_info({table})")
+        rows = await cur.fetchall()
+        return {r["name"] for r in rows}
 
     async def ensure_user_row(self, telegram_id: int) -> None:
         now = utcnow_iso()
@@ -68,7 +91,14 @@ class Repo:
         row = await cur.fetchone()
         if not row:
             return None
-        return User(**dict(row))
+
+        d = dict(row)
+
+        # На старых БД этих полей может не быть (до миграции)
+        d.setdefault("designer_interest", 0)
+        d.setdefault("designer_interest_at", None)
+
+        return User(**d)
 
     async def set_consent(self, telegram_id: int, consent: bool, enable_notify: bool) -> None:
         now = utcnow_iso()
@@ -89,6 +119,7 @@ class Repo:
                 UPDATE users
                 SET consent=0, consent_at=NULL, notify_enabled=0, notify_consent_at=NULL,
                     name=NULL, email=NULL, role=NULL, phone=NULL, city=NULL,
+                    designer_interest=0, designer_interest_at=NULL,
                     updated_at=?
                 WHERE telegram_id=?
                 """,
@@ -132,20 +163,51 @@ class Repo:
         await self._c().execute("DELETE FROM users WHERE telegram_id=?", (telegram_id,))
         await self._c().commit()
 
+    # ✅ ДИЗАЙНЕР: отметка интереса к сотрудничеству
+    async def set_designer_interest(self, telegram_id: int, interested: bool) -> None:
+        await self.ensure_user_row(telegram_id)
+        now = utcnow_iso()
+        await self._c().execute(
+            """
+            UPDATE users
+            SET designer_interest=?,
+                designer_interest_at=?,
+                updated_at=?
+            WHERE telegram_id=?
+            """,
+            (1 if interested else 0, now if interested else None, now, telegram_id),
+        )
+        await self._c().commit()
+
+    # --------- Visit requests ---------
     async def create_visit_request(
         self,
         telegram_id: int,
         city: str,
         contact_method: str,
         contact_value: str | None,
-        name_snapshot: str | None,
-        role_snapshot: str | None,
+        name_snapshot: str | None = None,   # ✅ теперь НЕ обязательно
+        role_snapshot: str | None = None,   # ✅ теперь НЕ обязательно
     ) -> None:
+        """
+        Чтобы меню не падало, snapshots теперь optional.
+        Если не передали — попробуем взять из users.
+        """
+        if name_snapshot is None or role_snapshot is None:
+            u = await self.get_user(telegram_id)
+            if u:
+                if name_snapshot is None:
+                    name_snapshot = u.name
+                if role_snapshot is None:
+                    role_snapshot = u.role
+
         now = utcnow_iso()
         await self._c().execute(
             """
-            INSERT INTO visit_requests(telegram_id, name_snapshot, role_snapshot, city,
-                                     contact_method, contact_value, status, created_at)
+            INSERT INTO visit_requests(
+                telegram_id, name_snapshot, role_snapshot, city,
+                contact_method, contact_value, status, created_at
+            )
             VALUES(?, ?, ?, ?, ?, ?, 'new', ?)
             """,
             (telegram_id, name_snapshot, role_snapshot, city, contact_method, contact_value, now),
@@ -161,10 +223,10 @@ class Repo:
 
         cur3 = await self._c().execute("SELECT COUNT(*) as c FROM visit_requests WHERE status='new'")
         vr_new = (await cur3.fetchone())["c"]
+
         return {"users": users_count, "notify": notify_count, "visit_new": vr_new}
 
     # --------- Collections / Sculptures ----------
-
     async def add_collection(self, title: str, short_desc: str | None, cover_file_id: str | None, sort_order: int) -> int:
         now = utcnow_iso()
         cur = await self._c().execute(

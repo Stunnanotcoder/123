@@ -1,4 +1,5 @@
 PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS users (
   telegram_id INTEGER PRIMARY KEY,
@@ -6,11 +7,17 @@ CREATE TABLE IF NOT EXISTS users (
   consent_at TEXT NULL,
   notify_enabled INTEGER DEFAULT 0,
   notify_consent_at TEXT NULL,
+
   name TEXT NULL,
   email TEXT NULL,
   role TEXT NULL,
   phone TEXT NULL,
   city TEXT NULL,
+
+  -- ✅ дизайнер: хочет сотрудничать
+  designer_interest INTEGER DEFAULT 0,
+  designer_interest_at TEXT NULL,
+
   created_at TEXT,
   updated_at TEXT
 );
@@ -24,7 +31,8 @@ CREATE TABLE IF NOT EXISTS visit_requests (
   contact_method TEXT NOT NULL,
   contact_value TEXT NULL,
   status TEXT DEFAULT 'new',
-  created_at TEXT
+  created_at TEXT,
+  FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS collections (
@@ -52,16 +60,21 @@ CREATE TABLE IF NOT EXISTS sculptures (
   is_featured INTEGER DEFAULT 0,
   published_at TEXT NULL,
   created_at TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS sculpture_photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sculpture_id INTEGER NOT NULL,
   file_id TEXT NOT NULL,
-  sort_order INTEGER DEFAULT 0
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY (sculpture_id) REFERENCES sculptures(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_sculptures_collection ON sculptures(collection_id);
 CREATE INDEX IF NOT EXISTS idx_photos_sculpture ON sculpture_photos(sculpture_id);
 CREATE INDEX IF NOT EXISTS idx_users_notify ON users(consent, notify_enabled, role);
+
+-- ✅ быстрый поиск дизайнеров
+CREATE INDEX IF NOT EXISTS idx_users_designer_interest ON users(designer_interest, designer_interest_at);

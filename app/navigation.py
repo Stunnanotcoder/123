@@ -20,9 +20,14 @@ class Screen:
     reply: ReplyKeyboardMarkup | None = None
     reply_prompt: str | None = None
     disable_web_page_preview: bool = True
+    # Если не задан — используем дефолт Nav (HTML)
+    parse_mode: ParseMode | None = None
 
 
 Renderer = Callable[[int, dict], Awaitable[Screen]]
+
+
+CAPTION_LIMIT = 900  # безопасно для фото/видео caption (Telegram 1024, HTML/ссылки съедают байты)
 
 
 def _safe_text(text: str | None, fallback: str = "…") -> str:
@@ -39,10 +44,11 @@ class Nav:
     - last message ids (может быть 1-3 сообщения: видео/фото/текст + aux)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, default_parse_mode: ParseMode = ParseMode.HTML) -> None:
         self._stack: dict[int, list[str]] = {}
         self._last_ids: dict[int, list[int]] = {}
         self._renderers: dict[str, Renderer] = {}
+        self._default_parse_mode: ParseMode = default_parse_mode
 
     def register(self, screen_prefix: str, renderer: Renderer) -> None:
         self._renderers[screen_prefix] = renderer
@@ -102,6 +108,9 @@ class Nav:
         # 3) страхуем текст
         screen_text = _safe_text(screen.text)
 
+        # parse_mode: экранный или дефолтный
+        pm: ParseMode = screen.parse_mode or self._default_parse_mode
+
         sent_ids: list[int] = []
 
         # 0) если надо убрать reply-клавиатуру (после request_contact)
@@ -111,73 +120,58 @@ class Nav:
                 chat_id=chat_id,
                 text="…",
                 reply_markup=ReplyKeyboardRemove(),
-                parse_mode=ParseMode.HTML,
+                parse_mode=pm,
             )
             await safe_delete(bot, chat_id, rm_msg.message_id)
+
+        # helper: отправка длинного текста отдельно
+        async def _send_text_only() -> int:
+            m = await bot.send_message(
+                chat_id=chat_id,
+                text=screen_text,
+                reply_markup=screen.inline,
+                disable_web_page_preview=screen.disable_web_page_preview,
+                parse_mode=pm,
+            )
+            return m.message_id
 
         # 4) основной контент: видео/фото+текст или только текст
 
         # 4.1) видео
         if screen.video_file_id and not screen.video_file_id.startswith("PLACEHOLDER"):
-            CAPTION_LIMIT = 1129 # безопасно, Telegram limit ~1024, но с HTML лучше оставить запас
-
             if len(screen_text) <= CAPTION_LIMIT and screen.inline and screen.reply is None:
                 v = await bot.send_video(
                     chat_id=chat_id,
                     video=screen.video_file_id,
                     caption=screen_text,
                     reply_markup=screen.inline,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=pm,
                 )
                 sent_ids.append(v.message_id)
             else:
                 v = await bot.send_video(chat_id=chat_id, video=screen.video_file_id)
                 sent_ids.append(v.message_id)
-
-                msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=screen_text,
-                    reply_markup=screen.inline,
-                    disable_web_page_preview=screen.disable_web_page_preview,
-                    parse_mode=ParseMode.HTML,
-                )
-                sent_ids.append(msg.message_id)
+                sent_ids.append(await _send_text_only())
 
         # 4.2) фото
         elif screen.photo_file_id and not screen.photo_file_id.startswith("PLACEHOLDER"):
-            CAPTION_LIMIT = 1129 # безопасно, Telegram limit ~1024, но с HTML лучше оставить запас
             if len(screen_text) <= CAPTION_LIMIT and screen.inline and screen.reply is None:
-                msg = await bot.send_photo(
+                p = await bot.send_photo(
                     chat_id=chat_id,
                     photo=screen.photo_file_id,
                     caption=screen_text,
                     reply_markup=screen.inline,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=pm,
                 )
-                sent_ids.append(msg.message_id)
+                sent_ids.append(p.message_id)
             else:
-                ph = await bot.send_photo(chat_id=chat_id, photo=screen.photo_file_id)
-                sent_ids.append(ph.message_id)
-
-                msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=screen_text,
-                    reply_markup=screen.inline,
-                    disable_web_page_preview=screen.disable_web_page_preview,
-                    parse_mode=ParseMode.HTML,
-                )
-                sent_ids.append(msg.message_id)
+                p = await bot.send_photo(chat_id=chat_id, photo=screen.photo_file_id)
+                sent_ids.append(p.message_id)
+                sent_ids.append(await _send_text_only())
 
         # 4.3) только текст
         else:
-            msg = await bot.send_message(
-                chat_id=chat_id,
-                text=screen_text,
-                reply_markup=screen.inline,
-                disable_web_page_preview=screen.disable_web_page_preview,
-                parse_mode=ParseMode.HTML,
-            )
-            sent_ids.append(msg.message_id)
+            sent_ids.append(await _send_text_only())
 
         # 5) aux message с reply keyboard (request_contact)
         if screen.reply is not None:
@@ -186,7 +180,7 @@ class Nav:
                 chat_id=chat_id,
                 text=prompt,
                 reply_markup=screen.reply,
-                parse_mode=ParseMode.HTML,
+                parse_mode=pm,
             )
             sent_ids.append(aux.message_id)
 
@@ -205,7 +199,6 @@ class Nav:
                 self.push(chat_id, screen_id)
 
     async def back(self, bot: Bot, chat_id: int, fallback_screen: str) -> None:
-        # снимаем текущий
         self.pop(chat_id)
         prev = self.peek(chat_id)
         if not prev:
